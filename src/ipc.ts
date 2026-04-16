@@ -196,7 +196,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
     }
-
   };
 
   // Watch the base IPC dir so we pick up newly-created group folders without
