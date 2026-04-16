@@ -36,6 +36,10 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+    -- Composite index for the hot getNewMessages / getMessagesSince queries,
+    -- which filter by chat_jid and timestamp together.
+    CREATE INDEX IF NOT EXISTS idx_messages_chat_jid_timestamp
+      ON messages(chat_jid, timestamp);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -52,6 +56,9 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
+    -- Index for getTasksForGroup lookups, which are called per container spawn.
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_group_folder
+      ON scheduled_tasks(group_folder);
 
     CREATE TABLE IF NOT EXISTS task_run_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +153,13 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
+  // WAL lets readers proceed during writes (the message loop and scheduler
+  // both read while the IPC path writes); synchronous=NORMAL is the
+  // recommended pairing and is safe with WAL. busy_timeout avoids spurious
+  // SQLITE_BUSY errors if a write briefly contends with a checkpoint.
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('busy_timeout = 5000');
   createSchema(db);
 
   // Migrate from JSON files if they exist

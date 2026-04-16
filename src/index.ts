@@ -44,9 +44,9 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  getSenderAllowlist,
   isSenderAllowed,
   isTriggerAllowed,
-  loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
@@ -163,7 +163,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const allowlistCfg = loadSenderAllowlist();
+    const allowlistCfg = getSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
         TRIGGER_PATTERN.test(m.content.trim()) &&
@@ -391,7 +391,7 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const allowlistCfg = loadSenderAllowlist();
+            const allowlistCfg = getSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
                 TRIGGER_PATTERN.test(m.content.trim()) &&
@@ -483,7 +483,7 @@ async function main(): Promise<void> {
     onMessage: (chatJid: string, msg: NewMessage) => {
       // Sender allowlist drop mode: discard messages from denied senders before storing
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const cfg = loadSenderAllowlist();
+        const cfg = getSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&
           !isSenderAllowed(chatJid, msg.sender, cfg)

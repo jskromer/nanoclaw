@@ -3,7 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -26,6 +26,15 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
+// Safety-net interval for the event-driven IPC watcher. fs.watch events can be
+// missed (e.g. on network filesystems, or if a directory is replaced wholesale),
+// so we still run a full scan periodically as a backstop.
+const IPC_SAFETY_NET_INTERVAL = 10_000;
+// Debounce window after a watch event before we run a scan. Coalesces bursts of
+// events (a single agent often writes multiple files back-to-back) into one
+// scan, while keeping latency well under 100ms.
+const IPC_DEBOUNCE_MS = 25;
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -35,6 +44,44 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
+
+  // Track which per-group subdirectories we've already attached watchers to so
+  // we don't accumulate duplicates on every scan.
+  const watchedFolders = new Set<string>();
+  let pendingScan: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleScan = () => {
+    if (pendingScan) return;
+    pendingScan = setTimeout(() => {
+      pendingScan = null;
+      processIpcFiles().catch((err) =>
+        logger.error({ err }, 'Error during IPC scan'),
+      );
+    }, IPC_DEBOUNCE_MS);
+  };
+
+  const ensureFolderWatchers = (
+    sourceGroup: string,
+    messagesDir: string,
+    tasksDir: string,
+  ) => {
+    if (watchedFolders.has(sourceGroup)) return;
+    let attached = false;
+    for (const dir of [messagesDir, tasksDir]) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const watcher = fs.watch(dir, scheduleScan);
+        watcher.on('error', (err) =>
+          logger.warn({ err, dir }, 'IPC watcher error'),
+        );
+        watcher.unref();
+        attached = true;
+      } catch (err) {
+        logger.warn({ err, dir }, 'IPC watcher: cannot watch directory');
+      }
+    }
+    if (attached) watchedFolders.add(sourceGroup);
+  };
 
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
@@ -46,7 +93,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
     }
 
@@ -62,6 +108,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
       const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+
+      // Attach fs.watch on this group's subdirs the first time we see it.
+      // Subsequent writes to messages/ or tasks/ then trigger scheduleScan
+      // directly instead of waiting for the next safety-net tick.
+      ensureFolderWatchers(sourceGroup, messagesDir, tasksDir);
 
       // Process messages from this group's IPC directory
       try {
@@ -146,11 +197,30 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
     }
 
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
   };
 
-  processIpcFiles();
-  logger.info('IPC watcher started (per-group namespaces)');
+  // Watch the base IPC dir so we pick up newly-created group folders without
+  // waiting for the safety-net interval. The per-group fs.watch handles are
+  // attached lazily inside processIpcFiles when each group folder is observed.
+  try {
+    const baseWatcher = fs.watch(ipcBaseDir, scheduleScan);
+    baseWatcher.on('error', (err) =>
+      logger.warn({ err, ipcBaseDir }, 'IPC base watcher error'),
+    );
+    baseWatcher.unref();
+  } catch (err) {
+    logger.warn(
+      { err, ipcBaseDir },
+      'IPC watcher: cannot watch base dir; relying on safety-net interval',
+    );
+  }
+
+  // Initial scan picks up anything already on disk and attaches per-group
+  // watchers. The safety-net interval covers fs.watch event drops.
+  scheduleScan();
+  setInterval(scheduleScan, IPC_SAFETY_NET_INTERVAL).unref();
+
+  logger.info('IPC watcher started (event-driven, per-group namespaces)');
 }
 
 export async function processTaskIpc(

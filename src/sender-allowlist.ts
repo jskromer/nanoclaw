@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 
 import { SENDER_ALLOWLIST_PATH } from './config.js';
 import { logger } from './logger.js';
@@ -125,4 +126,61 @@ export function isTriggerAllowed(
     );
   }
   return allowed;
+}
+
+// --- Cached accessor ---
+// loadSenderAllowlist() does a sync readFile + JSON.parse + validate on every
+// call. The message loop hits this on every iteration (and again per inbound
+// message in drop-mode), so we cache the result and invalidate via fs.watch on
+// the parent directory. The plain loadSenderAllowlist() export is kept as a
+// pure function for tests that pass an explicit pathOverride.
+
+let cachedConfig: SenderAllowlistConfig | null = null;
+let watcherInitialized = false;
+
+function ensureWatcher(): void {
+  if (watcherInitialized) return;
+  watcherInitialized = true;
+  const dir = path.dirname(SENDER_ALLOWLIST_PATH);
+  const fileName = path.basename(SENDER_ALLOWLIST_PATH);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const watcher = fs.watch(dir, (_event, name) => {
+      // name can be null on some platforms; invalidate conservatively.
+      if (!name || name === fileName) cachedConfig = null;
+    });
+    watcher.on('error', (err) =>
+      logger.warn(
+        { err, dir },
+        'sender-allowlist: watcher error; cache may go stale',
+      ),
+    );
+    watcher.unref();
+  } catch (err) {
+    logger.warn(
+      { err, dir },
+      'sender-allowlist: cannot watch directory; cache may be stale',
+    );
+  }
+}
+
+/**
+ * Returns the cached allowlist config, loading it on first call and on every
+ * invalidation triggered by an fs.watch event on the config file.
+ *
+ * Use this in hot paths (message loop). Tests should call loadSenderAllowlist()
+ * directly with a pathOverride to bypass the cache.
+ */
+export function getSenderAllowlist(): SenderAllowlistConfig {
+  ensureWatcher();
+  if (cachedConfig === null) {
+    cachedConfig = loadSenderAllowlist();
+  }
+  return cachedConfig;
+}
+
+/** @internal - for tests only. */
+export function _resetSenderAllowlistCache(): void {
+  cachedConfig = null;
+  watcherInitialized = false;
 }
