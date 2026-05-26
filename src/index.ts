@@ -523,7 +523,16 @@ async function main(): Promise<void> {
       continue;
     }
     channels.push(channel);
-    await channel.connect();
+    try {
+      await channel.connect();
+    } catch (err) {
+      logger.error(
+        { err, channel: channelName },
+        'Channel failed to connect — keeping NanoClaw up without it. Re-run the channel skill or re-auth to restore it.',
+      );
+      const idx = channels.indexOf(channel);
+      if (idx !== -1) channels.splice(idx, 1);
+    }
   }
   if (channels.length === 0) {
     logger.fatal('No channels connected');
