@@ -72,6 +72,27 @@ export class WhatsAppChannel implements Channel {
       );
       return { version: undefined };
     });
+
+    // Tear down any previous socket before creating a new one. Without this,
+    // each reconnect leaks the old socket: its keep-alive interval pins the
+    // socket closure, which in turn retains the per-socket signal-key cache
+    // (makeCacheableSignalKeyStore) and event buffers, so none of it is ever
+    // GC'd. Over many reconnects this climbs to the heap ceiling and OOMs.
+    // removeAllListeners() must run BEFORE end() so our own 'connection.update'
+    // close handler doesn't fire and recursively trigger another reconnect.
+    if (this.sock) {
+      try {
+        // BaileysEventEmitter.removeAllListeners requires a specific event,
+        // so clear each one we registered below.
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.end(undefined);
+      } catch (err) {
+        logger.debug({ err }, 'Error tearing down previous WA socket');
+      }
+    }
+
     this.sock = makeWASocket({
       version,
       auth: {
@@ -81,6 +102,10 @@ export class WhatsAppChannel implements Channel {
       printQRInTerminal: false,
       logger,
       browser: Browsers.macOS('Chrome'),
+      // NanoClaw only consumes live messages via 'messages.upsert' and never
+      // reads Baileys' synced history. Disabling history sync avoids building
+      // and buffering large message-history payloads on every (re)connect.
+      shouldSyncHistoryMessage: () => false,
     });
 
     this.sock.ev.on('connection.update', (update) => {

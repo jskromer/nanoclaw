@@ -576,6 +576,25 @@ async function main(): Promise<void> {
       writeGroupsSnapshot(gf, im, ag, rj),
   });
   queue.setProcessMessagesFn(processGroupMessages);
+
+  // Memory heartbeat: log RSS/heap every 30 min so leaks surface in logs as a
+  // climbing trend instead of a silent OOM. Healthy steady-state holds flat.
+  // .unref() so it never keeps the process alive during shutdown.
+  setInterval(
+    () => {
+      const m = process.memoryUsage();
+      logger.info(
+        {
+          rssMB: Math.round(m.rss / 1048576),
+          heapUsedMB: Math.round(m.heapUsed / 1048576),
+          heapTotalMB: Math.round(m.heapTotal / 1048576),
+        },
+        'Memory heartbeat',
+      );
+    },
+    30 * 60 * 1000,
+  ).unref();
+
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
